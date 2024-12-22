@@ -18,8 +18,10 @@ import (
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sqs"
-	"github.com/aws/aws-sdk-go/service/sqs/sqsiface"
-	"github.com/zerofox-oss/go-aws-msg/retryer"
+	"github.com/yurizf/go-aws-msg-costs-control/awsinterfaces"
+	"github.com/yurizf/go-aws-msg-costs-control/batching"
+	"github.com/yurizf/go-aws-msg-costs-control/retryer"
+	"github.com/yurizf/go-aws-msg-costs-control/sqsencode"
 	msg "github.com/zerofox-oss/go-msg"
 )
 
@@ -50,7 +52,7 @@ type Server struct {
 	// AWS QueueURL
 	QueueURL string
 	// Concrete instance of SQSAPI
-	Svc sqsiface.SQSAPI
+	Svc awsinterfaces.SQSReceiver
 
 	maxConcurrentReceives chan struct{} // The maximum number of message processing routines allowed
 	retryTimeout          int64         // Visbility Timeout for a message when a receiver fails
@@ -61,6 +63,35 @@ type Server struct {
 	serverCtx          context.Context    // context used to control the life of the Server
 	serverCancelFunc   context.CancelFunc // CancelFunc to signal the server should stop requesting messages
 	session            *session.Session   // session used to re-create `Svc` when needed
+}
+
+// DI to support mocking
+var NewSQSReceiverFunc = func() (awsinterfaces.SQSReceiver, *session.Session, error) {
+	sess, err := session.NewSession()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	conf := &aws.Config{
+		Credentials: credentials.NewCredentials(&credentials.EnvProvider{}),
+		Region:      aws.String("us-west-2"),
+		Retryer: retryer.DefaultRetryer{
+			Retryer: client.DefaultRetryer{NumMaxRetries: 7},
+			Delay:   2 * time.Second,
+		},
+	}
+
+	// http://docs.aws.amazon.com/sdk-for-go/api/aws/client/#Config
+	if r := os.Getenv("AWS_REGION"); r != "" {
+		conf.Region = aws.String(r)
+	}
+
+	if url := os.Getenv("SQS_ENDPOINT"); url != "" {
+		conf.Endpoint = aws.String(url)
+	}
+
+	// Create an SQS Client with creds from the Environment
+	return sqs.New(sess, conf), sess, nil
 }
 
 // convertToMsgAttrs creates msg.Attributes from sqs.Message.Attributes.
@@ -77,6 +108,17 @@ func (s *Server) convertToAttrs(attr msg.Attributes, attrs map[string]*string) {
 	}
 }
 
+// convertAllAttrs
+func (s *Server) convertAllAttrs(m *sqs.Message) msg.Attributes {
+	// set the sqs attributes first
+	// and the custom message attributes after
+	// as they may override the regular attributes
+	attrs := msg.Attributes{}
+	s.convertToAttrs(attrs, m.Attributes)
+	s.convertToMsgAttrs(attrs, m.MessageAttributes)
+	return attrs
+}
+
 // Serve continuously receives messages from an SQS queue, creates a message,
 // and calls Receive on `r`. Serve is blocking and will not return until
 // Shutdown is called on the Server.
@@ -86,6 +128,7 @@ func (s *Server) Serve(r msg.Receiver) error {
 	for {
 		select {
 		case <-s.serverCtx.Done():
+			log.Printf("[TRACE] Closing Serve chan")
 			close(s.maxConcurrentReceives)
 
 			return msg.ErrServerClosed
@@ -106,9 +149,14 @@ func (s *Server) Serve(r msg.Receiver) error {
 
 			for _, m := range resp.Messages {
 				if m.MessageId != nil {
-					log.Printf("[TRACE] Received SQS Message: %s\n", *m.MessageId)
+					log.Printf("[TRACE] Received SQS Message: %s of %d bytes\n", *m.MessageId, len(*m.Body))
 				}
 
+				attrs := s.convertAllAttrs(m)
+				if attrs.Get(batching.ENCODING_ATTRIBUTE_KEY) == batching.ENCODING_ATTRIBUTE_VALUE {
+					err = s.serveBatch(m, &attrs, r)
+					continue
+				}
 				// Take a slot from the buffered channel
 				s.maxConcurrentReceives <- struct{}{}
 
@@ -117,13 +165,7 @@ func (s *Server) Serve(r msg.Receiver) error {
 						<-s.maxConcurrentReceives
 					}()
 
-					// set the sqs attributes first
-					// and the custom message attributes after
-					// as they may override the regular attributes
-
-					attrs := msg.Attributes{}
-					s.convertToAttrs(attrs, sqsMsg.Attributes)
-					s.convertToMsgAttrs(attrs, sqsMsg.MessageAttributes)
+					attrs := s.convertAllAttrs(sqsMsg)
 
 					m := &msg.Message{
 						Attributes: attrs,
@@ -163,6 +205,84 @@ func (s *Server) Serve(r msg.Receiver) error {
 			}
 		}
 	}
+}
+
+func (s *Server) serveBatch(m *sqs.Message, attrs *msg.Attributes, r msg.Receiver) error {
+
+	msgs, err := batching.DeBatch(*m.Body)
+	if err != nil {
+		log.Printf("[ERROR] cannot debatch message [%s]: %s\n---------------", err, *m.Body)
+		return err
+	}
+
+	log.Printf("[TRACE] Unpacked %d messages from the MsgID=%s batch", len(msgs), *m.MessageId)
+
+	// delete batch from SQS right away
+	_, err = s.Svc.DeleteMessage(&sqs.DeleteMessageInput{
+		QueueUrl:      aws.String(s.QueueURL),
+		ReceiptHandle: m.ReceiptHandle,
+	})
+
+	if err != nil {
+		log.Printf("[ERROR] Delete message: %s", err.Error())
+	}
+
+	for ok := true; ok; ok = len(msgs) > 0 {
+		select {
+		case <-s.serverCtx.Done():
+			log.Printf("[TRACE] serveBatch: Context is done.")
+			// leave s.maxConcurrentReceives chan open. The calling Serve routine will close it.
+			return msg.ErrServerClosed
+
+		default:
+			failed := make([]string, 0, 128)
+
+			for _, payload := range msgs {
+				// Take a slot from the buffered channel
+				// parallelize like unbatched messages
+				s.maxConcurrentReceives <- struct{}{}
+
+				// payload is partially base64-encoded
+				payload, err = sqsencode.Decode(payload)
+				if err != nil {
+					log.Printf("[ERROR] failed to decode msg %v %v", err, []rune(payload))
+					continue
+				}
+
+				go func(attrs msg.Attributes, payload string) {
+					defer func() {
+						<-s.maxConcurrentReceives
+					}()
+
+					m_p := &msg.Message{
+						Attributes: attrs,
+						Body:       bytes.NewBufferString(payload),
+					}
+
+					if err := r.Receive(s.receiverCtx, m_p); err != nil {
+						log.Printf("[ERROR] Receiver error: %s; will retry", err.Error())
+
+						failed = append(failed, payload)
+
+						throttleErr, ok := err.(ErrThrottleServer)
+						if ok {
+							log.Printf("[TRACE] throttling received, sleeping for: %s", throttleErr.Duration.String())
+
+							time.Sleep(throttleErr.Duration)
+						}
+						return
+					}
+
+				}(*attrs, payload)
+			}
+
+			// reprocess failed messages
+			msgs = failed
+		}
+	}
+
+	return err
+
 }
 
 func getVisiblityTimeout(retryTimeout int64, retryJitter int64) int64 {
@@ -215,7 +335,7 @@ type Option func(*Server) error
 // as environment variables.
 //
 // SQS_ENDPOINT can be set as an environment variable in order to
-// override the aws.Client's Configured Endpoint
+// override the awsinterfaces.Client's Configured Endpoint
 func NewServer(queueURL string, cl int, retryTimeout int64, opts ...Option) (msg.Server, error) {
 	// It makes no sense to have a concurrency of less than 1.
 	if cl < 1 {
@@ -223,31 +343,10 @@ func NewServer(queueURL string, cl int, retryTimeout int64, opts ...Option) (msg
 		cl = 1
 	}
 
-	sess, err := session.NewSession()
+	svc, sess, err := NewSQSReceiverFunc()
 	if err != nil {
 		return nil, err
 	}
-
-	conf := &aws.Config{
-		Credentials: credentials.NewCredentials(&credentials.EnvProvider{}),
-		Region:      aws.String("us-west-2"),
-		Retryer: retryer.DefaultRetryer{
-			Retryer: client.DefaultRetryer{NumMaxRetries: 7},
-			Delay:   2 * time.Second,
-		},
-	}
-
-	// http://docs.aws.amazon.com/sdk-for-go/api/aws/client/#Config
-	if r := os.Getenv("AWS_REGION"); r != "" {
-		conf.Region = aws.String(r)
-	}
-
-	if url := os.Getenv("SQS_ENDPOINT"); url != "" {
-		conf.Endpoint = aws.String(url)
-	}
-
-	// Create an SQS Client with creds from the Environment
-	svc := sqs.New(sess, conf)
 
 	serverCtx, serverCancelFunc := context.WithCancel(context.Background())
 	receiverCtx, receiverCancelFunc := context.WithCancel(context.Background())
