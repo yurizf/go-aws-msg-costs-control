@@ -183,7 +183,7 @@ func (t *TopicStruct) send(payload string) error {
 			_, err = t.snsClient.PublishWithContext(ctx, params)
 
 			if err != nil {
-				log.Printf("[ERROR] %s: error sending message of %d bytes with timeout %s to sns %s: %s", t.ID, len(payload), 3*time.Second, t.arnOrUrl, err.Error())
+				log.Printf("[ERROR] %s: error sending message of %d bytes with timeout %s to sns %s: %s", t.id, len(payload), 3*time.Second, t.arnOrUrl, err.Error())
 				time.Sleep(time.Duration(int64((i+1)*100) * int64(time.Millisecond)))
 				continue
 			}
@@ -202,7 +202,7 @@ func (t *TopicStruct) send(payload string) error {
 		for i := 0; i < 3; i++ {
 			_, err = t.sqsClient.SendMessageWithContext(ctx, params)
 			if err != nil {
-				log.Printf("[ERROR] %s: error sending message of %d bytes to sqs %s: %s", t.ID, len(payload), t.arnOrUrl, err.Error())
+				log.Printf("[ERROR] %s: error sending message of %d bytes to sqs %s: %s", t.id, len(payload), t.arnOrUrl, err.Error())
 				time.Sleep(time.Duration(int64((i+1)*100) * int64(time.Millisecond)))
 				continue
 			}
