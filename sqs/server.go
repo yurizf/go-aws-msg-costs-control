@@ -20,8 +20,8 @@ import (
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/yurizf/go-aws-msg-costs-control/awsinterfaces"
 	"github.com/yurizf/go-aws-msg-costs-control/batching"
+	"github.com/yurizf/go-aws-msg-costs-control/partialbase64encode"
 	"github.com/yurizf/go-aws-msg-costs-control/retryer"
-	"github.com/yurizf/go-aws-msg-costs-control/sqsencode"
 	msg "github.com/zerofox-oss/go-msg"
 )
 
@@ -243,7 +243,7 @@ func (s *Server) serveBatch(m *sqs.Message, attrs *msg.Attributes, r msg.Receive
 				s.maxConcurrentReceives <- struct{}{}
 
 				// payload is partially base64-encoded
-				payload, err = sqsencode.Decode(payload)
+				payload, err = partialbase64encode.Decode(payload)
 				if err != nil {
 					log.Printf("[ERROR] failed to decode msg %v %v", err, []rune(payload))
 					continue

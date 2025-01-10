@@ -1,4 +1,4 @@
-package sqsencode
+package partialbase64encode
 
 import (
 	"bytes"

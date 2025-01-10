@@ -2,7 +2,7 @@ package batching
 
 import (
 	"fmt"
-	"github.com/yurizf/go-aws-msg-costs-control/sqsencode"
+	"github.com/yurizf/go-aws-msg-costs-control/partialbase64encode"
 	"math/big"
 	"strings"
 )
@@ -19,7 +19,7 @@ func Batch(payloads []string) string {
 	var sb strings.Builder
 
 	for _, msg := range payloads {
-		sb.WriteString(sqsencode.PrefixWithLength(msg))
+		sb.WriteString(partialbase64encode.PrefixWithLength(msg))
 	}
 
 	return sb.String()

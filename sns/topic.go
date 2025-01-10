@@ -18,8 +18,8 @@ import (
 	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/yurizf/go-aws-msg-costs-control/awsinterfaces"
 	"github.com/yurizf/go-aws-msg-costs-control/batching"
+	"github.com/yurizf/go-aws-msg-costs-control/partialbase64encode"
 	"github.com/yurizf/go-aws-msg-costs-control/retryer"
-	"github.com/yurizf/go-aws-msg-costs-control/sqsencode"
 	msg "github.com/zerofox-oss/go-msg"
 	b64 "github.com/zerofox-oss/go-msg/decorators/base64"
 )
@@ -38,7 +38,7 @@ type Topic struct {
 	Svc      awsinterfaces.SNSPublisher
 	TopicARN string
 	session  *session.Session
-	Batching batching.Topic
+	Batcher  batching.Batcher
 }
 
 func getConf(t *Topic) (*aws.Config, error) {
@@ -50,7 +50,7 @@ func getConf(t *Topic) (*aws.Config, error) {
 	}
 }
 
-// Option is the signature that modifies a `Topic` to set some configuration
+// Option is the signature that modifies a `Batcher` to set some configuration
 type Option func(*Topic) error
 
 // WithCustomRetryer sets a custom `Retryer` to use on the SQS client.
@@ -112,12 +112,12 @@ func NewPartialBASE64Topic(topicARN string, opts ...Option) (msg.Topic, error) {
 	if err != nil {
 		return nil, err
 	}
-	return b64.Encoder(topic), nil
+	return partialbase64encode.Encoder(topic), nil
 }
 
 // NewUnencodedTopic creates an concrete SNS msg.Topic
 //
-// Messages published by the `Topic` returned will not
+// Messages published by the `Batcher` returned will not
 // have the body base64-encoded.
 func NewUnencodedTopic(topicARN string, opts ...Option) (msg.Topic, error) {
 	conf := &aws.Config{
@@ -162,10 +162,19 @@ func NewUnencodedTopic(topicARN string, opts ...Option) (msg.Topic, error) {
 // NewBatchedTopic creates an concrete SNS msg.Topic
 // It returns msg.Topic as opposed to BatchedTopic so that existing
 // calls to NewTopic could simply replace it with NewBatchedTopic
-// Messages published by the `Topic` returned will be partially
+// Messages published by the `Batcher` returned will be partially
 // base64-encoded: only runes SQS does not support will be encoded.
 // And these messages will be batched for transmission.
-func NewBatchedTopic(topicARN string, timeout ...time.Duration) (batching.Topic, error) {
+type BatchedTopic interface {
+	msg.Topic
+	batching.Batcher
+}
+type BatchedTopicS struct {
+	msg.Topic
+	batching.Batcher
+}
+
+func NewBatchedTopic(topicARN string, timeout ...time.Duration) (BatchedTopic, error) {
 	to := batching.DEFAULT_BATCH_TIMEOUT
 	if len(timeout) > 0 {
 		to = timeout[0]
@@ -174,9 +183,9 @@ func NewBatchedTopic(topicARN string, timeout ...time.Duration) (batching.Topic,
 	t, err := NewUnencodedTopic(topicARN)
 	if err == nil {
 		concrete := t.(*Topic)
-		b, err := batching.NewTopic(topicARN, t, concrete.Svc, to)
-		concrete.Batching = b
-		return b, err
+		b, err := batching.New(topicARN, concrete.Svc, to)
+		concrete.Batcher = b
+		return BatchedTopicS{concrete, b}, err
 	}
 
 	return nil, err
@@ -190,11 +199,11 @@ func (t *Topic) NewWriter(ctx context.Context) msg.MessageWriter {
 		snsClient:  t.Svc,
 		topicARN:   t.TopicARN,
 		ctx:        ctx,
-		batchTopic: t.Batching,
+		batcher:    t.Batcher,
 	}
 }
 
-// MessageWriter writes data to an output SNS batchTopic as configured via its
+// MessageWriter writes data to an output SNS batcher as configured via its
 // topicARN.
 type MessageWriter struct {
 	msg.MessageWriter
@@ -206,10 +215,9 @@ type MessageWriter struct {
 
 	snsClient awsinterfaces.SNSPublisher
 	topicARN  string
+	ctx       context.Context
 
-	batchTopic batching.Topic
-
-	ctx context.Context
+	batcher batching.Batcher
 }
 
 // Attributes returns the msg.Attributes associated with the MessageWriter.
@@ -231,13 +239,13 @@ func (w *MessageWriter) Close() error {
 	}
 	w.closed = true
 
-	if w.batchTopic != nil {
+	if w.batcher != nil {
 		attrs := *w.Attributes()
 		attrs[batching.ENCODING_ATTRIBUTE_KEY] = []string{batching.ENCODING_ATTRIBUTE_VALUE}
 
-		w.batchTopic.SetAttributes(buildSNSAttributes(w.Attributes()))
+		w.batcher.SetAttributes(buildSNSAttributes(w.Attributes()))
 		// putting Encode code here, next to the attributes assignment
-		return w.batchTopic.Append(sqsencode.Encode(w.buf.String()))
+		return w.batcher.Append(partialbase64encode.Encode(w.buf.String()))
 	}
 
 	params := &sns.PublishInput{

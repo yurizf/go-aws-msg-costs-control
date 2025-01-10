@@ -19,7 +19,7 @@ type mockSNSAPI struct {
 }
 
 // Publish mocks the SNSAPI's Publish function. Instead of publishing to an SNS
-// batchTopic, it puts the input onto a channel. This allows for test assertions.
+// batcher, it puts the input onto a channel. This allows for test assertions.
 func (s *mockSNSAPI) PublishWithContext(ctx aws.Context, input *sns.PublishInput, options ...request.Option) (*sns.PublishOutput, error) {
 	s.sentParamChan <- input
 	return nil, nil

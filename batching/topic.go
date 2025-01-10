@@ -8,8 +8,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/yurizf/go-aws-msg-costs-control/awsinterfaces"
-	"github.com/yurizf/go-aws-msg-costs-control/sqsencode"
-	gmsg "github.com/zerofox-oss/go-msg"
+	"github.com/yurizf/go-aws-msg-costs-control/partialbase64encode"
 	"log"
 	"strings"
 	"sync"
@@ -52,10 +51,9 @@ func createID() string {
 	return fmt.Sprintf("topic-%d", id.id)
 }
 
-// BatchedTopic is an extension of the generic Topic interface
-// Multiple goroutines may invoke method on a Topic simultaneously.
-type Topic interface {
-	gmsg.Topic // Topic Interface returned by NewTopic/NewUnencodedTopic
+// BatchedTopic is an extension of the generic Batcher interface
+// Multiple goroutines may invoke method on a Batcher simultaneously.
+type Batcher interface {
 	Append(payload string) error
 	SetAttributes(attrs any)
 	SetTopicTimeout(timeout time.Duration)
@@ -69,8 +67,7 @@ type Topic interface {
 }
 
 type TopicStruct struct {
-	queueType string
-	gmsg.Topic
+	queueType     string
 	arnOrUrl      string
 	id            string
 	mux           sync.Mutex
@@ -87,7 +84,7 @@ type TopicStruct struct {
 
 	concurrency chan struct{}
 
-	batcherCtx        context.Context    // context used to Topic the life of batcher engine
+	batcherCtx        context.Context    // context used to Batcher the life of batcher engine
 	batcherCancelFunc context.CancelFunc // CancelFunc for the batch engine go routines
 
 	wg sync.WaitGroup
@@ -106,13 +103,13 @@ func (t *TopicStruct) ID() string {
 }
 
 // SetTopicTimeout - updates the timeout used to fire batched messages for a topic
-// NewTopic should have been called for the topic prior to this call
+// New should have been called for the topic prior to this call
 func (t *TopicStruct) SetTopicTimeout(timeout time.Duration) {
 	t.timeout = timeout
 }
 
 // SetAttributes - sets a single attributes set for ALL queued msgs of a topic.
-// NewTopic should have been called for the topic prior to this call
+// New should have been called for the topic prior to this call
 func (t *TopicStruct) SetAttributes(attrs any) {
 
 	t.mux.Lock()
@@ -221,17 +218,16 @@ func (t *TopicStruct) DebugOFF() {
 	t.debug = false
 }
 
-// NewTopic creates and initializes the batching the engine data structures for a specific c sns/sqs.Topic
+// New creates and initializes the batching the engine data structures for a specific c sns/sqs.Topic
 //
 // It accepts the topic ARN,
 // an SNSPublisher or SQSSender interface instance (implemented as AWS SNS or SQS clients).
 // and the timeout value for this topic: upon its expiration the batch will be sendMessages to the topic
 // generics with unions referencing interfaces with methods are not currently supported. Hence, any and type assertions.
 // https://github.com/golang/go/issues/45346#issuecomment-862505803
-func NewTopic(topicARN string, t gmsg.Topic, p any, timeout time.Duration, concurrency ...int) (Topic, error) {
+func New(topicARN string, p any, timeout time.Duration, concurrency ...int) (Batcher, error) {
 
 	topic := TopicStruct{
-		Topic:    t,
 		timeout:  timeout,
 		arnOrUrl: topicARN,
 
@@ -348,7 +344,7 @@ func (t *TopicStruct) buildPayload() string {
 
 	var sb strings.Builder
 	for _, m := range t.batch {
-		sb.WriteString(sqsencode.PrefixWithLength(m.payload))
+		sb.WriteString(partialbase64encode.PrefixWithLength(m.payload))
 	}
 
 	t.batch = make([]msg, 0, 128)

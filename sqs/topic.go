@@ -16,7 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/yurizf/go-aws-msg-costs-control/awsinterfaces"
 	"github.com/yurizf/go-aws-msg-costs-control/batching"
-	"github.com/yurizf/go-aws-msg-costs-control/sqsencode"
+	"github.com/yurizf/go-aws-msg-costs-control/partialbase64encode"
 	msg "github.com/zerofox-oss/go-msg"
 )
 
@@ -46,7 +46,7 @@ var NewSQSSenderFunc = func() (awsinterfaces.SQSSender, error) {
 type Topic struct {
 	QueueURL string
 	Svc      awsinterfaces.SQSSender
-	Batching batching.Topic
+	Batcher  batching.Batcher
 }
 
 // NewTopic returns an sqs.Topic with fully configured SQSAPI
@@ -63,7 +63,7 @@ func NewTopic(queueURL string) (msg.Topic, error) {
 	}, nil
 }
 
-func NewBatchedTopic(queueURL string, timeout ...time.Duration) (batching.Topic, error) {
+func NewBatchedTopic(queueURL string, timeout ...time.Duration) (batching.Batcher, error) {
 	to := batching.DEFAULT_BATCH_TIMEOUT
 	if len(timeout) > 0 {
 		to = timeout[0]
@@ -72,8 +72,8 @@ func NewBatchedTopic(queueURL string, timeout ...time.Duration) (batching.Topic,
 	t, err := NewTopic(queueURL)
 	if err == nil {
 		tt, _ := t.(*Topic)
-		if b, err := batching.NewTopic(queueURL, t, tt.Svc, to); err == nil {
-			tt.Batching = b
+		if b, err := batching.New(queueURL, tt.Svc, to); err == nil {
+			tt.Batcher = b
 			return b, err
 		}
 	}
@@ -89,7 +89,7 @@ func (t *Topic) NewWriter(ctx context.Context) msg.MessageWriter {
 		ctx:        ctx,
 		queueURL:   t.QueueURL,
 		sqsClient:  t.Svc,
-		batchTopic: t.Batching,
+		batchTopic: t.Batcher,
 	}
 }
 
@@ -112,7 +112,7 @@ type MessageWriter struct {
 	// queueURL is the URL to the queue.
 	queueURL string
 
-	batchTopic batching.Topic
+	batchTopic batching.Batcher
 }
 
 // Attributes returns the msg.Attributes associated with the MessageWriter
@@ -151,7 +151,7 @@ func (w *MessageWriter) Close() error {
 		attrs[batching.ENCODING_ATTRIBUTE_KEY] = []string{batching.ENCODING_ATTRIBUTE_VALUE}
 		w.batchTopic.SetAttributes(buildSQSAttributes(w.Attributes()))
 		// putting Encode code here, next to the attributes assignment
-		return w.batchTopic.Append(sqsencode.Encode(w.buf.String()))
+		return w.batchTopic.Append(partialbase64encode.Encode(w.buf.String()))
 	}
 
 	params := &sqs.SendMessageInput{

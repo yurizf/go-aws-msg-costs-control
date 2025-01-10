@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/yurizf/go-aws-msg-costs-control/batching"
+	"github.com/yurizf/go-aws-msg-costs-control/partialbase64encode"
 	"github.com/yurizf/go-aws-msg-costs-control/sns"
-	"github.com/yurizf/go-aws-msg-costs-control/sqsencode"
 	"github.com/yurizf/go-aws-msg-costs-control/test/common"
 	"log"
 	"os"
@@ -78,7 +78,7 @@ func main() {
 	ch := make(chan string)
 	var wg sync.WaitGroup
 	var totalCount atomic.Int32
-	var allTopics map[string]batching.Topic = make(map[string]batching.Topic)
+	var allTopics map[string]batching.Batcher = make(map[string]batching.Batcher)
 
 	for i := 0; i < config.numberOfGoRoutines; i++ {
 		wg.Add(1)
@@ -138,7 +138,7 @@ func main() {
 					if err != nil {
 						log.Printf("[ERROR] %s Failed to close %d bytes (%d runes) msg writer buffer: %s", topic.ID(), len(msg), utf8.RuneCountInString(msg), err)
 						if config.do_db {
-							e := sqsencode.Encode(msg)
+							e := partialbase64encode.Encode(msg)
 							pgConn.Exec(dbCtx, insertFailedSQL, len(msg), msg, len(e), e)
 						}
 						return // no point to continue: the test will now fail

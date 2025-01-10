@@ -95,7 +95,7 @@ func Test_SNS(t *testing.T) {
 	t.Run(tt.name, func(t *testing.T) {
 
 		t.Log(tt.name)
-		topic, err := NewTopic("fake-topic", tt.args.publisher, 1*time.Second)
+		topic, err := New("fake-topic", tt.args.publisher, 1*time.Second)
 		if err != nil {
 			t.Errorf("could not create topic: %s", err)
 		}
@@ -122,7 +122,7 @@ func Test_SNS(t *testing.T) {
 	t.Run(tt.name, func(t *testing.T) {
 		t.Log(tt.name)
 
-		topic, err := NewTopic("fake-topic-1", tt.args.publisher, 30*time.Second)
+		topic, err := New("fake-topic-1", tt.args.publisher, 30*time.Second)
 		if err != nil {
 			t.Errorf("could not create topic: %s", err)
 		}
